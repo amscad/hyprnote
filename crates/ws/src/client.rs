@@ -48,7 +48,7 @@ impl WebSocketClient {
 
     pub async fn from_audio<T: WebSocketIO>(
         &self,
-        mut audio_stream: impl Stream<Item = T::Data> + Send + Unpin + 'static,
+        mut stream: impl Stream<Item = T::Data> + Send + Unpin + 'static,
     ) -> Result<(impl Stream<Item = T::Output>, WebSocketHandle), crate::Error> {
         let ws_stream = (|| self.try_connect(self.request.clone()))
             .retry(
@@ -83,7 +83,7 @@ impl WebSocketClient {
         let _send_task = tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    Some(data) = audio_stream.next() => {
+                    Some(data) = stream.next() => {
                         let input = T::to_input(data);
                         let msg = T::to_message(input);
 

@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use futures_util::StreamExt;
-use ractor::call_t;
+use ractor::{call, call_t};
 
 #[cfg(target_os = "macos")]
 use {
@@ -259,7 +259,7 @@ impl<R: tauri::Runtime, T: tauri::Manager<R>> ListenerPluginExt<R> for T {
         let guard = state.lock().await;
 
         if let Some(supervisor) = &guard.supervisor {
-            let _ = supervisor.cast(SessionMsg::Stop);
+            let _ = call!(supervisor, SessionMsg::Stop);
         }
     }
 }

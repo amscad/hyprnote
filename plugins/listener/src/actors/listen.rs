@@ -5,7 +5,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 
 use owhisper_interface::{ControlMessage, MixedMessage, Word2};
-use ractor::{Actor, ActorName, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorName, ActorProcessingErr, ActorRef, RpcReplyPort};
 use tauri_specta::Event;
 
 use crate::{manager::TranscriptManager, SessionEvent};
@@ -14,6 +14,8 @@ const LISTEN_STREAM_TIMEOUT: Duration = Duration::from_secs(60 * 15);
 
 pub enum ListenMsg {
     Audio(Bytes, Bytes),
+    Finalize(RpcReplyPort<()>),
+    FinalizeComplete,
 }
 
 pub struct ListenArgs {
@@ -27,6 +29,7 @@ pub struct ListenArgs {
 pub struct ListenState {
     tx: tokio::sync::mpsc::Sender<MixedMessage<(Bytes, Bytes), ControlMessage>>,
     rx_task: tokio::task::JoinHandle<()>,
+    finalize_reply: Option<RpcReplyPort<()>>,
 }
 
 pub struct ListenBridge;
@@ -48,7 +51,11 @@ impl Actor for ListenBridge {
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let (tx, rx_task) = spawn_rx_task(args, myself).await.unwrap();
-        Ok(ListenState { tx, rx_task })
+        Ok(ListenState {
+            tx,
+            rx_task,
+            finalize_reply: None,
+        })
     }
 
     async fn handle(
@@ -60,6 +67,21 @@ impl Actor for ListenBridge {
         match message {
             ListenMsg::Audio(mic, spk) => {
                 let _ = state.tx.try_send(MixedMessage::Audio((mic, spk)));
+            }
+            ListenMsg::Finalize(reply) => {
+                // Store the reply port to respond when finalization is complete
+                state.finalize_reply = Some(reply);
+                let _ = state
+                    .tx
+                    .try_send(MixedMessage::Control(ControlMessage::Finalize));
+            }
+            ListenMsg::FinalizeComplete => {
+                // Finalization is complete, send reply if we have one
+                if let Some(reply) = state.finalize_reply.take() {
+                    if !reply.is_closed() {
+                        let _ = reply.send(());
+                    }
+                }
             }
         }
         Ok(())
@@ -120,10 +142,22 @@ async fn spawn_rx_task(
         futures_util::pin_mut!(listen_stream);
 
         let mut manager = TranscriptManager::with_unix_timestamp(session_start_ts_ms);
+        let mut finalization_requested = false;
 
         loop {
             match tokio::time::timeout(LISTEN_STREAM_TIMEOUT, listen_stream.next()).await {
                 Ok(Some(response)) => {
+                    // Check if this response is from finalization
+                    if let owhisper_interface::StreamResponse::TranscriptResponse {
+                        from_finalize,
+                        ..
+                    } = &response
+                    {
+                        if *from_finalize {
+                            finalization_requested = true;
+                        }
+                    }
+
                     let diff = manager.append(response.clone());
 
                     let partial_words_by_channel: HashMap<usize, Vec<Word2>> = diff
@@ -181,6 +215,10 @@ async fn spawn_rx_task(
                 }
                 Ok(None) => {
                     tracing::info!("listen_stream_ended");
+                    // If finalization was requested, notify completion
+                    if finalization_requested {
+                        myself.cast(ListenMsg::FinalizeComplete).ok();
+                    }
                     break;
                 }
                 Err(_) => {

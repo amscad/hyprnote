@@ -4,7 +4,7 @@ use tauri::Manager;
 use tauri_specta::Event;
 
 use ractor::{
-    call_t, Actor, ActorCell, ActorName, ActorProcessingErr, ActorRef, RpcReplyPort,
+    call, call_t, Actor, ActorCell, ActorName, ActorProcessingErr, ActorRef, RpcReplyPort,
     SupervisionEvent,
 };
 use tokio_util::sync::CancellationToken;
@@ -23,7 +23,7 @@ use crate::{
 #[derive(Debug)]
 pub enum SessionMsg {
     Start { session_id: String },
-    Stop,
+    Stop(RpcReplyPort<()>),
     SetMicMute(bool),
     SetSpeakerMute(bool),
     GetMicMute(RpcReplyPort<bool>),
@@ -135,8 +135,11 @@ impl Actor for SessionSupervisor {
                     .await?;
             }
 
-            SessionMsg::Stop => {
+            SessionMsg::Stop(reply) => {
                 self.stop_session(state).await?;
+                if !reply.is_closed() {
+                    let _ = reply.send(());
+                }
             }
 
             SessionMsg::SetMicMute(muted) => {
@@ -344,6 +347,11 @@ impl SessionSupervisor {
     async fn stop_session(&self, state: &mut SessionState) -> Result<(), ActorProcessingErr> {
         if matches!(state.state, State::Inactive) {
             return Ok(());
+        }
+
+        if let Some(listen) = &state.actors.listen {
+            // Wait for finalization to complete
+            let _ = call!(listen, ListenMsg::Finalize);
         }
 
         state.token.cancel();
